@@ -1,5 +1,5 @@
 """
-fb_mapper.py - Improved version
+fb_mapper.py - Corrected version
 Maps a lightweight "simple mode" CSV into Facebook Ads Manager bulk-import format.
 Implements defaults, validation, and conflict resolution per spec.
 """
@@ -147,9 +147,9 @@ def _default_opt_goal(objective: str, goal: str) -> str:
         return OBJ_DEFAULTS[objective]["optimisation"]
     return "LINK_CLICKS"  # Safe default
 
-def _process_utm_parameters(link: str, utm_params: str) -> Tuple[str, str]:
+def _process_utm_parameters(link: str, utm_params: str, campaign_name: str = "", adset_name: str = "") -> Tuple[str, str]:
     """
-    Process link and UTM parameters separately.
+    Process link and UTM parameters with Meta dynamic parameter support.
     UTM parameters should be proper query string format.
     """
     if pd.isna(link) or str(link).strip() == "":
@@ -158,15 +158,21 @@ def _process_utm_parameters(link: str, utm_params: str) -> Tuple[str, str]:
     clean_link = str(link).strip()
     
     if pd.isna(utm_params) or str(utm_params).strip() == "":
-        # Generate default UTM parameters
-        utm_default = "utm_source=facebook&utm_medium=cpc&utm_campaign=facebook_ads"
+        # Generate default UTM parameters with Meta dynamic params
+        utm_default = "utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{adset.name}}"
         return clean_link, utm_default
     
     clean_utm = str(utm_params).strip()
     
+    # Replace any manual campaign/adset name placeholders if provided
+    if campaign_name:
+        clean_utm = clean_utm.replace("{campaign_name}", campaign_name.lower().replace(" ", "_"))
+    if adset_name:
+        clean_utm = clean_utm.replace("{adset_name}", adset_name.lower().replace(" ", "_"))
+    
     # Validate UTM format (basic check for key=value pairs)
     if not ('=' in clean_utm and 'utm_' in clean_utm):
-        raise ValueError(f"Invalid UTM format: '{clean_utm}'. Expected format: utm_source=facebook&utm_medium=cpc&utm_campaign=name")
+        raise ValueError(f"Invalid UTM format: '{clean_utm}'. Expected format: utm_source=meta&utm_medium=cpc&utm_campaign={{{{campaign.name}}}}")
     
     return clean_link, clean_utm
 
@@ -276,7 +282,9 @@ def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 # Process link and UTM parameters
                 link, utm_tags = _process_utm_parameters(
                     row.get("Link", ""), 
-                    row.get("URL Tags", "")
+                    row.get("URL Tags", ""),
+                    str(row.get("Campaign Name", "")).strip(),
+                    str(row.get("Ad Set Name", "")).strip()
                 )
                 
                 # Get defaults based on objective
@@ -328,7 +336,10 @@ def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
                     "Gender": _gender(row.get("Gender", "All")),
                     "Custom Audiences": str(row.get("Custom Audiences", "")).strip(),
                     "Excluded Custom Audiences": str(row.get("Excluded Custom Audiences", "")).strip(),
+                    "Saved Audiences": str(row.get("Saved Audiences", "")).strip(),
+                    "Excluded Saved Audiences": str(row.get("Excluded Saved Audiences", "")).strip(),
                     "Optimisation Goal": opt_goal,
+                    "Publisher Platforms": "facebook,instagram",  # Default to Facebook and Instagram only
                     
                     # Ad/Creative level
                     "Ad Name": str(row.get("Ad Name", "")).strip(),
@@ -338,15 +349,13 @@ def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
                         "Ad Status", 
                         "ACTIVE"
                     ),
-                    "Title": str(row.get("Title", "")).strip(),
-                    "Body": str(row.get("Body", "")).strip(),
+                    "Headline": str(row.get("Headline", "")).strip(),
+                    "Primary Text": str(row.get("Primary Text", "")).strip(),
+                    "Description": str(row.get("Description", "")).strip(),
                     "Link": link,
                     "URL Tags": utm_tags,
                     "Call to Action": cta,
                     "Image File Name": str(row.get("Image File Name", "")).strip(),
-                    
-                    # Meta best practices
-                    "Advantage+ placements": "true",  # Let Meta optimise placements
                 }
                 rows.append(output_row)
                 
@@ -371,11 +380,13 @@ def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         # Ad Set
         "Ad Set Name", "Ad Set Run Status", "Ad Set Daily Budget", 
         "Ad Set Time Start", "Ad Set Time Stop", "Countries", "Age Min", "Age Max", 
-        "Gender", "Custom Audiences", "Excluded Custom Audiences", "Optimisation Goal",
+        "Gender", "Custom Audiences", "Excluded Custom Audiences", 
+        "Saved Audiences", "Excluded Saved Audiences", "Optimisation Goal", 
+        "Publisher Platforms",
         
         # Ad/Creative
-        "Ad Name", "Ad Status", "Title", "Body", "Link", "URL Tags", 
-        "Call to Action", "Image File Name"
+        "Ad Name", "Ad Status", "Headline", "Primary Text", "Description", 
+        "Link", "URL Tags", "Call to Action", "Image File Name"
     ]
     
     # Ensure all columns exist and reorder
