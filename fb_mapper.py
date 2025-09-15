@@ -1,251 +1,391 @@
-
 """
-fb_mapper.py
+fb_mapper.py - Improved version
 Maps a lightweight "simple mode" CSV into Facebook Ads Manager bulk-import format.
 Implements defaults, validation, and conflict resolution per spec.
 """
 from __future__ import annotations
 import pandas as pd
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from datetime import datetime
 
 VALID = {
     "status": {"ACTIVE", "PAUSED", "ARCHIVED", "DELETED"},
     "objectives": {
-        "Traffic","Leads","Conversions","Sales","Video Views","Reach","Engagement","App Installs"
+        "Traffic", "Leads", "Conversions", "Sales", "Video Views", "Reach", 
+        "Engagement", "App Installs", "Brand Awareness", "Messages"
     },
-    "buying_type": {"AUCTION","FIXED_PRICE"},
-    "bid_strategies": {"Lowest cost","Cost cap","ROAS goal","Bid cap"},
+    "buying_type": {"AUCTION", "FIXED_PRICE"},
+    "bid_strategies": {"Lowest cost", "Cost cap", "ROAS goal", "Bid cap"},
     "cta": {
-        "LEARN_MORE","SIGN_UP","GET_QUOTE","SHOP_NOW","SUBSCRIBE","APPLY_NOW","CONTACT_US","BOOK_NOW"
+        "LEARN_MORE", "SIGN_UP", "GET_QUOTE", "SHOP_NOW", "SUBSCRIBE", 
+        "APPLY_NOW", "CONTACT_US", "BOOK_NOW", "DOWNLOAD", "GET_DIRECTIONS"
     },
-    "gender": {"All","Male","Female"},
+    "gender": {"All", "Male", "Female"},
     "placements": {
-        "facebook","instagram","audience_network","messenger",
-        "feed","stories","reels","instream_video","marketplace"
+        "facebook", "instagram", "audience_network", "messenger",
+        "feed", "stories", "reels", "instream_video", "marketplace"
+    },
+    "special_categories": {
+        "CREDIT", "EMPLOYMENT", "HOUSING", "SOCIAL_ISSUES", "POLITICS"
     }
 }
 
-# Objective → default optimisation + CTA
+# Objective → default optimisation + CTA mapping
 OBJ_DEFAULTS = {
     "Leads": {"optimisation": "LEAD_GENERATION", "cta": "SIGN_UP"},
     "Conversions": {"optimisation": "CONVERSIONS", "cta": "SHOP_NOW"},
     "Sales": {"optimisation": "VALUE", "cta": "SHOP_NOW"},
     "Traffic": {"optimisation": "LINK_CLICKS", "cta": "LEARN_MORE"},
     "Video Views": {"optimisation": "THRUPLAY", "cta": "LEARN_MORE"},
+    "Brand Awareness": {"optimisation": "BRAND_AWARENESS", "cta": "LEARN_MORE"},
+    "Reach": {"optimisation": "REACH", "cta": "LEARN_MORE"},
+    "Engagement": {"optimisation": "POST_ENGAGEMENT", "cta": "LEARN_MORE"},
+    "App Installs": {"optimisation": "APP_INSTALLS", "cta": "DOWNLOAD"},
+    "Messages": {"optimisation": "CONVERSATIONS", "cta": "CONTACT_US"}
 }
 
 def _coerce_time(val: Any) -> str:
+    """Convert various time formats to YYYY-MM-DD HH:MM format."""
     if pd.isna(val) or val == "":
         return ""
-    # Accept "YYYY-MM-DD HH:MM" and ISO8601-ish
+    
     try:
-        return datetime.strptime(str(val), "%Y-%m-%d %H:%M").strftime("%Y-%m-%d %H:%M")
+        # Handle common formats
+        if isinstance(val, str):
+            val = val.strip()
+            # Handle "YYYY-MM-DD HH:MM" format
+            if len(val) == 16 and val[10] == ' ':
+                return datetime.strptime(val, "%Y-%m-%d %H:%M").strftime("%Y-%m-%d %H:%M")
+            # Handle "YYYY-MM-DD" format - add default time
+            if len(val) == 10:
+                return f"{val} 00:00"
+        
+        # Use pandas to parse and normalise
+        dt = pd.to_datetime(val, utc=False, errors="raise")
+        return dt.strftime("%Y-%m-%d %H:%M")
     except Exception:
-        try:
-            # Pandas parse then normalise
-            dt = pd.to_datetime(val, utc=False, errors="raise")
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            raise ValueError(f"Invalid time format: {val}")
+        raise ValueError(f"Invalid time format: {val}. Use YYYY-MM-DD HH:MM or YYYY-MM-DD")
 
 def _pos_number(val: Any, allow_blank=True) -> str:
+    """Convert to positive number, handling blanks appropriately."""
     if pd.isna(val) or str(val).strip() == "":
-        return "" if allow_blank else "0"
+        return "" if allow_blank else "1"
     try:
         v = float(val)
         if v <= 0:
             raise ValueError("must be > 0")
-        # No decimals for budgets in CSV
+        # Return as integer for budgets (Meta expects whole numbers)
         return str(int(round(v)))
-    except Exception:
+    except (ValueError, TypeError):
         raise ValueError(f"Invalid positive number: {val}")
 
-def _enum(val: Any, allowed: set, field: str) -> str:
+def _enum(val: Any, allowed: set, field: str, default: str = "") -> str:
+    """Validate value against allowed set."""
     if pd.isna(val) or val == "":
-        return ""
-    s = str(val)
+        return default
+    s = str(val).strip()
     if s not in allowed:
         raise ValueError(f"{field}: '{s}' not in {sorted(allowed)}")
     return s
 
 def _gender(val: Any) -> str:
+    """Handle gender field with proper defaults."""
     if pd.isna(val) or val == "":
         return "All"
-    s = str(val).title()
+    s = str(val).strip().title()
     if s not in VALID["gender"]:
-        raise ValueError(f"Gender: '{val}' invalid")
+        raise ValueError(f"Gender: '{val}' must be one of {sorted(VALID['gender'])}")
     return s
 
-def _age_pair(minv: Any, maxv: Any, special: str) -> (str,str):
+def _age_pair(minv: Any, maxv: Any, special_categories: str = "") -> Tuple[str, str]:
+    """Handle age pair with Meta's minimum age requirements."""
+    # Meta's minimum age is 13, but 18+ for special ad categories and many countries
+    min_allowed = 13
+    max_allowed = 65
+    
+    # Special ad categories require 18+ minimum
+    if special_categories and str(special_categories).strip():
+        min_allowed = 18
+    
+    # Handle blank values
     if pd.isna(minv) and pd.isna(maxv):
-        return "18","65"
+        return str(min_allowed), str(max_allowed)
+    
     try:
-        mi = int(minv) if not pd.isna(minv) else 18
-        ma = int(maxv) if not pd.isna(maxv) else 65
-        if mi > ma:
-            raise ValueError("Age Min must be ≤ Age Max")
-        # Special Ad Categories restrictions (simplified common case)
-        if special and special.strip() != "":
-            mi = max(mi, 18)
-            ma = min(ma, 65)
-        return str(mi), str(ma)
-    except Exception:
-        raise ValueError(f"Invalid age pair: {minv}, {maxv}")
+        # Parse values
+        min_age = int(minv) if not pd.isna(minv) and str(minv).strip() else min_allowed
+        max_age = int(maxv) if not pd.isna(maxv) and str(maxv).strip() else max_allowed
+        
+        # Validate logical constraints
+        if min_age > max_age:
+            raise ValueError(f"Age Min ({min_age}) must be ≤ Age Max ({max_age})")
+        
+        # Enforce Meta platform constraints
+        if min_age < min_allowed:
+            min_age = min_allowed
+        if max_age > max_allowed:
+            max_age = max_allowed
+            
+        return str(min_age), str(max_age)
+        
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid age pair: Min={minv}, Max={maxv}. Must be integers between {min_allowed}-{max_allowed}")
 
 def _default_cta(objective: str, cta: str) -> str:
-    if cta and cta != "":
-        return _enum(cta, VALID["cta"], "CTA")
+    """Get CTA with objective-based defaults."""
+    if cta and str(cta).strip():
+        return _enum(cta, VALID["cta"], "Call to Action")
     if objective in OBJ_DEFAULTS:
         return OBJ_DEFAULTS[objective]["cta"]
     return "LEARN_MORE"
 
 def _default_opt_goal(objective: str, goal: str) -> str:
-    if goal and goal != "":
-        return goal
+    """Get optimisation goal with objective-based defaults."""
+    if goal and str(goal).strip():
+        return str(goal).strip()
     if objective in OBJ_DEFAULTS:
         return OBJ_DEFAULTS[objective]["optimisation"]
-    return ""
+    return "LINK_CLICKS"  # Safe default
 
-def _ensure_utm(link: str, utm: str) -> (str, str):
-    if pd.isna(link) or link == "":
-        return "", ""
-    if pd.isna(utm) or utm == "":
-        # Simple default
-        return link, "utm_source=facebook&utm_medium=cpc"
-    return link, utm
-
-def transform(df: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
+def _process_utm_parameters(link: str, utm_params: str) -> Tuple[str, str]:
     """
-    Input: lightweight rows tagged by Input Level: 'campaign' or 'adset'
-    Each adset row carries creative fields for one ad for simplicity.
-    Output: Facebook bulk CSV rows with proper headers + errors table.
+    Process link and UTM parameters separately.
+    UTM parameters should be proper query string format.
+    """
+    if pd.isna(link) or str(link).strip() == "":
+        return "", ""
+    
+    clean_link = str(link).strip()
+    
+    if pd.isna(utm_params) or str(utm_params).strip() == "":
+        # Generate default UTM parameters
+        utm_default = "utm_source=facebook&utm_medium=cpc&utm_campaign=facebook_ads"
+        return clean_link, utm_default
+    
+    clean_utm = str(utm_params).strip()
+    
+    # Validate UTM format (basic check for key=value pairs)
+    if not ('=' in clean_utm and 'utm_' in clean_utm):
+        raise ValueError(f"Invalid UTM format: '{clean_utm}'. Expected format: utm_source=facebook&utm_medium=cpc&utm_campaign=name")
+    
+    return clean_link, clean_utm
+
+def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Transform lightweight CSV format to Facebook Ads Manager bulk import format.
+    
+    Input: DataFrame with 'Input Level' column ('campaign' or 'adset')
+    Campaign rows define campaign-level settings
+    Adset rows inherit campaign settings and define ad set + creative
+    
+    Returns: (output_df, errors_df)
     """
     errors = []
     rows = []
 
-    # Forward fill campaign-level values so adset rows inherit
+    # Create copy and forward-fill campaign-level values
     df_ff = df.copy()
-    # propagate campaign values down until next campaign row
+    
+    # Campaign columns that should propagate down to adset rows
     campaign_cols = [
-        "Campaign Name","Campaign Status","Special Ad Categories","Special Ad Category Country",
-        "Campaign Objective","Buying Type","Campaign Bid Strategy","Campaign Daily Budget",
-        "Campaign Start Time","Campaign Stop Time"
+        "Campaign Name", "Campaign Status", "Special Ad Categories", 
+        "Special Ad Category Country", "Campaign Objective", "Buying Type", 
+        "Campaign Bid Strategy", "Campaign Daily Budget", "Campaign Start Time", 
+        "Campaign Stop Time"
     ]
-    for c in campaign_cols:
-        df_ff[c] = df_ff[c].ffill()
+    
+    # Forward fill campaign values
+    for col in campaign_cols:
+        if col in df_ff.columns:
+            df_ff[col] = df_ff[col].ffill()
 
-    # Process row by row
-    for i, r in df_ff.iterrows():
-        level = str(r.get("Input Level","")).lower()
-        if level not in {"campaign","adset"}:
-            errors.append({"row": i+1, "field": "Input Level", "error": "Must be 'campaign' or 'adset'"})
+    # Process each row
+    for idx, row in df_ff.iterrows():
+        row_num = idx + 2  # Excel row number (1-indexed + header)
+        level = str(row.get("Input Level", "")).lower().strip()
+        
+        if level not in {"campaign", "adset"}:
+            errors.append({
+                "row": row_num, 
+                "field": "Input Level", 
+                "error": "Must be 'campaign' or 'adset'"
+            })
             continue
 
-        if level == "campaign":
-            # Emit one campaign row
-            try:
-                objective = _enum(str(r.get("Campaign Objective","")), VALID["objectives"], "Objective")
-                out = {
-                    "Campaign Name": r.get("Campaign Name",""),
-                    "Campaign Status": _enum(r.get("Campaign Status","ACTIVE"), VALID["status"], "Status"),
-                    "Special Ad Categories": r.get("Special Ad Categories",""),
-                    "Special Ad Category Country": r.get("Special Ad Category Country",""),
-                    "Buying Type": _enum(r.get("Buying Type","AUCTION"), VALID["buying_type"], "Buying Type"),
-                    "Campaign Objective": objective,
-                    "Campaign Bid Strategy": _enum(r.get("Campaign Bid Strategy","Lowest cost"), VALID["bid_strategies"], "Bid Strategy"),
-                    "Campaign Daily Budget": _pos_number(r.get("Campaign Daily Budget","")),
-                    "Campaign Start Time": _coerce_time(r.get("Campaign Start Time","")),
-                    "Campaign Stop Time": _coerce_time(r.get("Campaign Stop Time","")),
-                    # Defaults
-                    "Advantage+ placements": "true",
-                }
-                # Campaign-level budget vs adset budgets will be checked when processing adsets
-                rows.append(out)
-            except Exception as e:
-                errors.append({"row": i+1, "field": "campaign", "error": str(e)})
-            continue
-
-        # adset rows produce both ad set and ad rows in the same record for Ads Manager
         try:
-            objective = _enum(str(r.get("Campaign Objective","")), VALID["objectives"], "Objective")
-
-            # Budget conflict resolution
-            c_budget = r.get("Campaign Daily Budget","")
-            as_budget = r.get("Ad Set Daily Budget","")
-            c_budget_s = str(c_budget).strip()
-            as_budget_s = str(as_budget).strip()
-            if c_budget_s and as_budget_s:
-                # Prefer ad set budget for ad set row and blank campaign budget in emitted row
-                c_budget_s = ""
-            age_min, age_max = _age_pair(r.get("Age Min",""), r.get("Age Max",""), r.get("Special Ad Categories",""))
-            link, utm = _ensure_utm(r.get("Link",""), r.get("URL Tags",""))
-            cta = _default_cta(objective, r.get("Call to Action",""))
-            opt_goal = _default_opt_goal(objective, r.get("Optimisation Goal",""))
-
-            out = {
-                # Campaign
-                "Campaign Name": r.get("Campaign Name",""),
-                "Campaign Status": _enum(r.get("Campaign Status","ACTIVE"), VALID["status"], "Status"),
-                "Special Ad Categories": r.get("Special Ad Categories",""),
-                "Special Ad Category Country": r.get("Special Ad Category Country",""),
-                "Buying Type": _enum(r.get("Buying Type","AUCTION"), VALID["buying_type"], "Buying Type"),
-                "Campaign Objective": objective,
-                "Campaign Bid Strategy": _enum(r.get("Campaign Bid Strategy","Lowest cost"), VALID["bid_strategies"], "Bid Strategy"),
-                "Campaign Daily Budget": _pos_number(c_budget_s) if c_budget_s else "",
-                "Campaign Start Time": _coerce_time(r.get("Campaign Start Time","")),
-                "Campaign Stop Time": _coerce_time(r.get("Campaign Stop Time","")),
-                "Advantage+ placements": "true",
-
-                # Ad set
-                "Ad Set Name": r.get("Ad Set Name",""),
-                "Ad Set Run Status": _enum(r.get("Ad Set Run Status","ACTIVE"), VALID["status"], "Status"),
-                "Ad Set Daily Budget": _pos_number(as_budget) if as_budget_s else "",
-                "Ad Set Time Start": _coerce_time(r.get("Ad Set Time Start","")),
-                "Ad Set Time Stop": _coerce_time(r.get("Ad Set Time Stop","")),
-                "Countries": r.get("Countries",""),
-                "Age Min": age_min,
-                "Age Max": age_max,
-                "Gender": _gender(r.get("Gender","All")),
-                "Custom Audiences": r.get("Custom Audiences",""),
-                "Excluded Custom Audiences": r.get("Excluded Custom Audiences",""),
-                "Optimisation Goal": opt_goal,
-
-                # Placements optional explicit left blank in simple mode
-
-                # Creative
-                "Ad Name": r.get("Ad Name",""),
-                "Ad Status": _enum(r.get("Ad Status","ACTIVE"), VALID["status"], "Status"),
-                "Title": r.get("Title",""),
-                "Body": r.get("Body",""),
-                "Link": link,
-                "URL Tags": utm,
-                "Call to Action": cta,
-                "Image File Name": r.get("Image File Name",""),
-            }
-            rows.append(out)
+            if level == "campaign":
+                # Process campaign row - simpler structure
+                objective = _enum(
+                    row.get("Campaign Objective", ""), 
+                    VALID["objectives"], 
+                    "Campaign Objective"
+                )
+                
+                output_row = {
+                    "Campaign Name": str(row.get("Campaign Name", "")).strip(),
+                    "Campaign Status": _enum(
+                        row.get("Campaign Status", "ACTIVE"), 
+                        VALID["status"], 
+                        "Campaign Status", 
+                        "ACTIVE"
+                    ),
+                    "Special Ad Categories": str(row.get("Special Ad Categories", "")).strip(),
+                    "Special Ad Category Country": str(row.get("Special Ad Category Country", "")).strip(),
+                    "Campaign Objective": objective,
+                    "Buying Type": _enum(
+                        row.get("Buying Type", "AUCTION"), 
+                        VALID["buying_type"], 
+                        "Buying Type", 
+                        "AUCTION"
+                    ),
+                    "Campaign Bid Strategy": _enum(
+                        row.get("Campaign Bid Strategy", "Lowest cost"), 
+                        VALID["bid_strategies"], 
+                        "Campaign Bid Strategy", 
+                        "Lowest cost"
+                    ),
+                    "Campaign Daily Budget": _pos_number(row.get("Campaign Daily Budget", "")),
+                    "Campaign Start Time": _coerce_time(row.get("Campaign Start Time", "")),
+                    "Campaign Stop Time": _coerce_time(row.get("Campaign Stop Time", "")),
+                }
+                rows.append(output_row)
+                
+            else:  # adset level
+                # Process adset row - includes campaign, adset, and ad data
+                objective = _enum(
+                    row.get("Campaign Objective", ""), 
+                    VALID["objectives"], 
+                    "Campaign Objective"
+                )
+                
+                # Handle budget conflict resolution
+                campaign_budget = str(row.get("Campaign Daily Budget", "")).strip()
+                adset_budget = str(row.get("Ad Set Daily Budget", "")).strip()
+                
+                # If both are specified, prefer adset budget and clear campaign budget
+                if campaign_budget and adset_budget:
+                    campaign_budget = ""
+                
+                # Process age ranges
+                age_min, age_max = _age_pair(
+                    row.get("Age Min", ""), 
+                    row.get("Age Max", ""), 
+                    row.get("Special Ad Categories", "")
+                )
+                
+                # Process link and UTM parameters
+                link, utm_tags = _process_utm_parameters(
+                    row.get("Link", ""), 
+                    row.get("URL Tags", "")
+                )
+                
+                # Get defaults based on objective
+                cta = _default_cta(objective, row.get("Call to Action", ""))
+                opt_goal = _default_opt_goal(objective, row.get("Optimisation Goal", ""))
+                
+                output_row = {
+                    # Campaign level (inherited)
+                    "Campaign Name": str(row.get("Campaign Name", "")).strip(),
+                    "Campaign Status": _enum(
+                        row.get("Campaign Status", "ACTIVE"), 
+                        VALID["status"], 
+                        "Campaign Status", 
+                        "ACTIVE"
+                    ),
+                    "Special Ad Categories": str(row.get("Special Ad Categories", "")).strip(),
+                    "Special Ad Category Country": str(row.get("Special Ad Category Country", "")).strip(),
+                    "Campaign Objective": objective,
+                    "Buying Type": _enum(
+                        row.get("Buying Type", "AUCTION"), 
+                        VALID["buying_type"], 
+                        "Buying Type", 
+                        "AUCTION"
+                    ),
+                    "Campaign Bid Strategy": _enum(
+                        row.get("Campaign Bid Strategy", "Lowest cost"), 
+                        VALID["bid_strategies"], 
+                        "Campaign Bid Strategy", 
+                        "Lowest cost"
+                    ),
+                    "Campaign Daily Budget": _pos_number(campaign_budget) if campaign_budget else "",
+                    "Campaign Start Time": _coerce_time(row.get("Campaign Start Time", "")),
+                    "Campaign Stop Time": _coerce_time(row.get("Campaign Stop Time", "")),
+                    
+                    # Ad Set level
+                    "Ad Set Name": str(row.get("Ad Set Name", "")).strip(),
+                    "Ad Set Run Status": _enum(
+                        row.get("Ad Set Run Status", "ACTIVE"), 
+                        VALID["status"], 
+                        "Ad Set Run Status", 
+                        "ACTIVE"
+                    ),
+                    "Ad Set Daily Budget": _pos_number(adset_budget) if adset_budget else "",
+                    "Ad Set Time Start": _coerce_time(row.get("Ad Set Time Start", "")),
+                    "Ad Set Time Stop": _coerce_time(row.get("Ad Set Time Stop", "")),
+                    "Countries": str(row.get("Countries", "")).strip(),
+                    "Age Min": age_min,
+                    "Age Max": age_max,
+                    "Gender": _gender(row.get("Gender", "All")),
+                    "Custom Audiences": str(row.get("Custom Audiences", "")).strip(),
+                    "Excluded Custom Audiences": str(row.get("Excluded Custom Audiences", "")).strip(),
+                    "Optimisation Goal": opt_goal,
+                    
+                    # Ad/Creative level
+                    "Ad Name": str(row.get("Ad Name", "")).strip(),
+                    "Ad Status": _enum(
+                        row.get("Ad Status", "ACTIVE"), 
+                        VALID["status"], 
+                        "Ad Status", 
+                        "ACTIVE"
+                    ),
+                    "Title": str(row.get("Title", "")).strip(),
+                    "Body": str(row.get("Body", "")).strip(),
+                    "Link": link,
+                    "URL Tags": utm_tags,
+                    "Call to Action": cta,
+                    "Image File Name": str(row.get("Image File Name", "")).strip(),
+                    
+                    # Meta best practices
+                    "Advantage+ placements": "true",  # Let Meta optimise placements
+                }
+                rows.append(output_row)
+                
         except Exception as e:
-            errors.append({"row": i+1, "field": "adset", "error": str(e)})
+            errors.append({
+                "row": row_num,
+                "field": level,
+                "error": str(e)
+            })
 
-    out_df = pd.DataFrame(rows)
-
-    # Reorder columns to match expected template shape for bulk import
-    desired_cols = [
+    # Create output DataFrame
+    output_df = pd.DataFrame(rows)
+    
+    # Define column order for Meta Ads Manager compatibility
+    column_order = [
         # Campaign
-        "Campaign Name","Campaign Status","Special Ad Categories","Special Ad Category Country",
-        "Buying Type","Campaign Objective","Campaign Bid Strategy","Campaign Daily Budget",
-        "Campaign Start Time","Campaign Stop Time","Advantage+ placements",
-        # Ad set
-        "Ad Set Name","Ad Set Run Status","Ad Set Daily Budget","Ad Set Time Start","Ad Set Time Stop",
-        "Countries","Age Min","Age Max","Gender","Custom Audiences","Excluded Custom Audiences","Optimisation Goal",
-        # Creative
-        "Ad Name","Ad Status","Title","Body","Link","URL Tags","Call to Action","Image File Name"
+        "Campaign Name", "Campaign Status", "Special Ad Categories", 
+        "Special Ad Category Country", "Campaign Objective", "Buying Type", 
+        "Campaign Bid Strategy", "Campaign Daily Budget", "Campaign Start Time", 
+        "Campaign Stop Time", "Advantage+ placements",
+        
+        # Ad Set
+        "Ad Set Name", "Ad Set Run Status", "Ad Set Daily Budget", 
+        "Ad Set Time Start", "Ad Set Time Stop", "Countries", "Age Min", "Age Max", 
+        "Gender", "Custom Audiences", "Excluded Custom Audiences", "Optimisation Goal",
+        
+        # Ad/Creative
+        "Ad Name", "Ad Status", "Title", "Body", "Link", "URL Tags", 
+        "Call to Action", "Image File Name"
     ]
-    # Add missing columns if any
-    for c in desired_cols:
-        if c not in out_df.columns:
-            out_df[c] = ""
-    out_df = out_df[desired_cols]
-
-    err_df = pd.DataFrame(errors, columns=["row","field","error"])
-    return out_df, err_df
+    
+    # Ensure all columns exist and reorder
+    for col in column_order:
+        if col not in output_df.columns:
+            output_df[col] = ""
+    
+    output_df = output_df[column_order]
+    
+    # Create errors DataFrame
+    errors_df = pd.DataFrame(errors)
+    
+    return output_df, errors_df
