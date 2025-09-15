@@ -108,10 +108,14 @@ with st.sidebar:
     
     # UTM defaults
     st.subheader("UTM Defaults")
-    utm_source = st.text_input("UTM Source", value="facebook")
+    utm_source = st.text_input("UTM Source", value="meta")
     utm_medium = st.text_input("UTM Medium", value="cpc")
-    utm_campaign = st.text_input("UTM Campaign Template", value="facebook_ads", 
-                                help="Use {campaign_name} for dynamic replacement")
+    utm_campaign = st.text_input("UTM Campaign", value="{{campaign.name}}", 
+                                help="Meta dynamic parameter for campaign name")
+    utm_content = st.text_input("UTM Content", value="{{adset.name}}", 
+                               help="Meta dynamic parameter for ad set name")
+    
+    st.caption("Full UTM string: utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{adset.name}}")
 
 # Main content area
 col1, col2 = st.columns([2, 1])
@@ -207,13 +211,15 @@ with col1:
                     as_budget = st.number_input(f"Daily Budget (£)", min_value=1, value=25, key=f"as_budget_{i}")
                     audience = st.text_input(f"Custom Audiences", placeholder="ca_lookalike_1pct", key=f"audience_{i}")
                 with col_d:
-                    ad_title = st.text_input(f"Ad Title", value=f"Great offer {i+1}", key=f"ad_title_{i}")
-                    ad_body = st.text_area(f"Ad Body", value="Discover amazing products", height=60, key=f"ad_body_{i}")
+                    ad_headline = st.text_input(f"Ad Headline", value=f"Great offer {i+1}", key=f"ad_headline_{i}")
+                    ad_primary_text = st.text_area(f"Primary Text", value="Discover amazing products", height=60, key=f"ad_primary_{i}")
+                    ad_description = st.text_input(f"Description", value="Limited time offer", key=f"ad_desc_{i}")
                     landing_url = st.text_input(f"Landing Page URL", value="https://example.com", key=f"url_{i}")
                 
                 adset_data.append({
                     'name': as_name, 'budget': as_budget, 'audience': audience,
-                    'title': ad_title, 'body': ad_body, 'url': landing_url
+                    'headline': ad_headline, 'primary_text': ad_primary_text, 
+                    'description': ad_description, 'url': landing_url
                 })
         
         if st.button("🚀 Generate Campaign Data", type="primary"):
@@ -232,7 +238,7 @@ with col1:
             
             # Ad set rows
             for i, adset in enumerate(adset_data):
-                utm_params = f"utm_source={utm_source}&utm_medium={utm_medium}&utm_campaign={utm_campaign.replace('{campaign_name}', camp_name.lower().replace(' ', '_'))}"
+                utm_params = f"utm_source={utm_source}&utm_medium={utm_medium}&utm_campaign={utm_campaign}&utm_content={utm_content}"
                 
                 rows.append({
                     'Input Level': 'adset',
@@ -245,8 +251,9 @@ with col1:
                     'Gender': default_gender,
                     'Custom Audiences': adset['audience'],
                     'Ad Name': f"{adset['name']} - Ad",
-                    'Title': adset['title'],
-                    'Body': adset['body'],
+                    'Headline': adset['headline'],
+                    'Primary Text': adset['primary_text'],
+                    'Description': adset['description'],
                     'Link': adset['url'],
                     'URL Tags': utm_params,
                     'Call to Action': OBJ_DEFAULTS.get(camp_obj, {}).get('cta', 'LEARN_MORE')
@@ -388,10 +395,13 @@ if df_input is not None:
                     'Age Min': ['', 25, 25],
                     'Age Max': ['', 55, 55],
                     'Custom Audiences': ['', '', 'ca_website_visitors'],
+                    'Saved Audiences': ['', 'interested_in_cars', ''],
                     'Ad Name': ['', 'Prospecting Ad', 'Remarketing Ad'],
-                    'Title': ['', 'Great Product!', 'Come Back!'],
-                    'Body': ['', 'Amazing offer for you', 'Complete your purchase'],
+                    'Headline': ['', 'Great Product!', 'Come Back!'],
+                    'Primary Text': ['', 'Amazing offer for you', 'Complete your purchase'],
+                    'Description': ['', 'Limited time only', 'Don\'t miss out'],
                     'Link': ['', 'https://example.com', 'https://example.com'],
+                    'URL Tags': ['', 'utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{adset.name}}', 'utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{adset.name}}'],
                     'Call to Action': ['', 'SHOP_NOW', 'SHOP_NOW']
                 }
                 template_df = pd.DataFrame(template_data)
@@ -426,7 +436,8 @@ with st.expander("ℹ️ Help & Documentation"):
     **Key Fields:**
     - **Required**: Input Level, Campaign Name, Campaign Objective
     - **Recommended**: Ad Set Name (for adset rows), Countries, Age Min/Max
-    - **Creative**: Title, Body, Link, Call to Action
+    - **Creative**: Headline, Primary Text, Description, Link, Call to Action
+    - **Audiences**: Custom Audiences, Saved Audiences (use one or both)
     
     **UTM Parameters:**
     - Use Meta's dynamic parameters: `{{campaign.name}}` and `{{adset.name}}`
