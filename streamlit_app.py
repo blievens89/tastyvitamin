@@ -429,7 +429,8 @@ with st.expander("ℹ️ Help & Documentation"):
     - **Creative**: Title, Body, Link, Call to Action
     
     **UTM Parameters:**
-    - Use proper query string format: `utm_source=facebook&utm_medium=cpc&utm_campaign=my_campaign`
+    - Use Meta's dynamic parameters: `{{campaign.name}}` and `{{adset.name}}`
+    - Default format: `utm_source=meta&utm_medium=cpc&utm_campaign={{campaign.name}}&utm_content={{adset.name}}`
     - Avoid putting UTMs directly in the Link field
     
     **Age Targeting:**

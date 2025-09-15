@@ -366,7 +366,7 @@ def transform(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
         "Campaign Name", "Campaign Status", "Special Ad Categories", 
         "Special Ad Category Country", "Campaign Objective", "Buying Type", 
         "Campaign Bid Strategy", "Campaign Daily Budget", "Campaign Start Time", 
-        "Campaign Stop Time", "Advantage+ placements",
+        "Campaign Stop Time",
         
         # Ad Set
         "Ad Set Name", "Ad Set Run Status", "Ad Set Daily Budget", 
